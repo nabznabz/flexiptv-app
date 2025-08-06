@@ -1,3 +1,4 @@
+import uuid
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
@@ -7,14 +8,22 @@ from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.gridlayout import GridLayout
 from kivy.clock import Clock
+from kivy.uix.videoplayer import VideoPlayer
+import requests
+
+def get_mac_address():
+    # Retourne la MAC sous forme HH:HH:HH:HH:HH:HH
+    mac = uuid.getnode()
+    return ':'.join(f'{(mac >> ele) & 0xff:02x}' for ele in range(40, -1, -8))
 
 class LoginScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         layout = BoxLayout(orientation='vertical', padding=20, spacing=20)
         layout.add_widget(Label(text='NabziP TV', font_size='32sp'))
-        self.server_input = TextInput(hint_text='Adresse du serveur', multiline=False)
-        self.mac_input = TextInput(hint_text='Adresse MAC', multiline=False)
+        self.server_input = TextInput(hint_text='Adresse du serveur (ex: http://monserveur)', multiline=False)
+        self.mac_input    = TextInput(hint_text='Adresse MAC', multiline=False)
+        self.mac_input.text = get_mac_address()  # Pré-remplir la MAC détectée
         layout.add_widget(self.server_input)
         layout.add_widget(self.mac_input)
         btn = Button(text='Se connecter', size_hint_y=0.2)
@@ -24,13 +33,14 @@ class LoginScreen(Screen):
 
     def do_connect(self, instance):
         app = App.get_running_app()
-        app.server = self.server_input.text
+        app.server = self.server_input.text.strip('/')
         app.mac = self.mac_input.text
         app.root.current = 'main'
 
 class MainScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.current_items = []
         main_layout = BoxLayout(orientation='vertical')
 
         # Barre de recherche
@@ -59,46 +69,67 @@ class MainScreen(Screen):
         main_layout.add_widget(self.scroll)
         self.add_widget(main_layout)
 
-        # Chargement par défaut
+        # Chargement par défaut de la catégorie Live
         Clock.schedule_once(lambda dt: self.load_category('live'), 0.5)
 
     def on_search(self, instance):
-        query = self.search_input.text.lower()
-        items = self.current_items
-        filtered = [item for item in items if query in item['name'].lower()]
+        q = self.search_input.text.lower()
+        filtered = [i for i in self.current_items if q in i['name'].lower()]
         self.display_items(filtered)
 
     def load_category(self, category):
-        # Simuler des données
-        if category == 'live':
-            data = [
-                {'name': 'TF1 HD'}, {'name': 'France 2'}, {'name': 'M6'}, {'name': 'Canal+'}
-            ]
-        elif category == 'films':
-            data = [
-                {'name': 'Film Action'}, {'name': 'Comédie'}, {'name': 'Drame'}
-            ]
-        else:  # séries
-            data = [
-                {'name': 'Série A'}, {'name': 'Série B'}, {'name': 'Série C'}
-            ]
+        app = App.get_running_app()
+        try:
+            url = f"{app.server}/api/playlist/{category}?mac={app.mac}"
+            resp = requests.get(url, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()  # Doit renvoyer liste d’objets {'name':..., 'stream_url':...}
+        except Exception as e:
+            data = []
+            print("Erreur récupération IPTV:", e)
         self.current_items = data
         self.display_items(data)
 
     def display_items(self, items):
         self.grid.clear_widgets()
         for it in items:
-            box = BoxLayout(orientation='vertical', size_hint_y=None, height=120)
-            box.add_widget(Label(text=it['name'], size_hint_y=1))
+            box = BoxLayout(orientation='vertical', size_hint_y=None, height=150)
+            box.add_widget(Label(text=it['name'], size_hint_y=0.7))
             btn = Button(text='▶', size_hint_y=0.3)
+            btn.bind(on_press=lambda inst, url=it['stream_url']: self.open_player(url))
             box.add_widget(btn)
             self.grid.add_widget(box)
+
+    def open_player(self, stream_url):
+        app = App.get_running_app()
+        app.stream_url = stream_url
+        app.root.current = 'player'
+
+class PlayerScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical')
+        self.video = VideoPlayer(source='', state='stop', options={'allow_stretch': True}, size_hint_y=0.9)
+        back = Button(text='← Retour', size_hint_y=0.1)
+        back.bind(on_press=self.go_back)
+        layout.add_widget(self.video)
+        layout.add_widget(back)
+        self.add_widget(layout)
+
+    def on_enter(self):
+        app = App.get_running_app()
+        self.video.source = app.stream_url
+        self.video.state = 'play'
+
+    def go_back(self, instance):
+        App.get_running_app().root.current = 'main'
 
 class IPTVApp(App):
     def build(self):
         sm = ScreenManager()
         sm.add_widget(LoginScreen(name='login'))
         sm.add_widget(MainScreen(name='main'))
+        sm.add_widget(PlayerScreen(name='player'))
         return sm
 
 if __name__ == '__main__':
